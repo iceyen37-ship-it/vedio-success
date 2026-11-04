@@ -4,6 +4,14 @@ import android.annotation.SuppressLint;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.provider.MediaStore;
+import android.webkit.ValueCallback;
+
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.core.content.FileProvider;
+
+import java.io.File;
 import android.view.View;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
@@ -32,6 +40,26 @@ public class MainActivity extends AppCompatActivity {
     private WebView webView;
     private ProgressBar progressBar;
     private WebViewAssetLoader assetLoader;
+
+    // 「拍照記錄」：<input type="file"> 交給手機相機（或相簿）
+    private ValueCallback<Uri[]> filePathCallback;
+    private Uri cameraUri;
+    private final ActivityResultLauncher<Intent> fileChooserLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (filePathCallback == null) return;
+                Uri[] uris = null;
+                if (result.getResultCode() == RESULT_OK) {
+                    Intent data = result.getData();
+                    if (data != null && data.getData() != null) {
+                        uris = new Uri[]{data.getData()};          // 從相簿挑選
+                    } else if (cameraUri != null) {
+                        uris = new Uri[]{cameraUri};               // 剛拍的照片
+                    }
+                }
+                filePathCallback.onReceiveValue(uris);
+                filePathCallback = null;
+                cameraUri = null;
+            });
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -121,6 +149,44 @@ public class MainActivity extends AppCompatActivity {
                 } else {
                     progressBar.setVisibility(View.GONE);
                 }
+            }
+
+            @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
+                                             FileChooserParams params) {
+                if (filePathCallback != null) filePathCallback.onReceiveValue(null);
+                filePathCallback = callback;
+                Intent camera = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+                try {
+                    File dir = new File(getCacheDir(), "images");
+                    dir.mkdirs();
+                    File photo = File.createTempFile("meal_", ".jpg", dir);
+                    cameraUri = FileProvider.getUriForFile(MainActivity.this,
+                            getPackageName() + ".fileprovider", photo);
+                    camera.putExtra(MediaStore.EXTRA_OUTPUT, cameraUri);
+                    camera.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                } catch (Exception e) {
+                    camera = null;
+                    cameraUri = null;
+                }
+                Intent gallery = new Intent(Intent.ACTION_GET_CONTENT);
+                gallery.addCategory(Intent.CATEGORY_OPENABLE);
+                gallery.setType("image/*");
+                Intent chooser;
+                if (camera != null && params.isCaptureEnabled()) {
+                    chooser = camera;                               // capture 屬性：直接開相機
+                } else {
+                    chooser = Intent.createChooser(gallery, "選擇照片");
+                    if (camera != null) chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{camera});
+                }
+                try {
+                    fileChooserLauncher.launch(chooser);
+                } catch (Exception e) {
+                    filePathCallback.onReceiveValue(null);
+                    filePathCallback = null;
+                    return false;
+                }
+                return true;
             }
 
             @Override
