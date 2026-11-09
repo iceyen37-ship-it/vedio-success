@@ -29,6 +29,26 @@ import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.webkit.WebViewAssetLoader;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
+import androidx.core.content.ContextCompat;
+import androidx.credentials.ClearCredentialStateRequest;
+import androidx.credentials.Credential;
+import androidx.credentials.CredentialManager;
+import androidx.credentials.CredentialManagerCallback;
+import androidx.credentials.CustomCredential;
+import androidx.credentials.GetCredentialRequest;
+import androidx.credentials.GetCredentialResponse;
+import androidx.credentials.exceptions.ClearCredentialException;
+import androidx.credentials.exceptions.GetCredentialCancellationException;
+import androidx.credentials.exceptions.GetCredentialException;
+import androidx.credentials.exceptions.NoCredentialException;
+import androidx.webkit.JavaScriptReplyProxy;
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption;
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential;
+import android.os.CancellationSignal;
+import org.json.JSONObject;
+import java.util.Collections;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -40,6 +60,7 @@ public class MainActivity extends AppCompatActivity {
     private WebView webView;
     private ProgressBar progressBar;
     private WebViewAssetLoader assetLoader;
+    private CredentialManager credentialManager;
 
     // 「拍照記錄」：<input type="file"> 交給手機相機（或相簿）
     private ValueCallback<Uri[]> filePathCallback;
@@ -88,7 +109,9 @@ public class MainActivity extends AppCompatActivity {
                 .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
                 .build();
 
+        credentialManager = CredentialManager.create(this);
         initWebView();
+        initGoogleBridge();
         initBackPressHandler();
 
         if (savedInstanceState != null) {
@@ -195,6 +218,74 @@ public class MainActivity extends AppCompatActivity {
                 request.deny();
             }
         });
+    }
+
+    // Google 登入：網頁裡的 AndroidGoogle.postMessage({type:"signIn", clientId}) 會打開手機內建的
+    // 「使用 Google 帳戶登入」畫面，拿到的 ID token 只回傳給 App 自己的網頁（appassets 網域）。
+    private void initGoogleBridge() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return;
+        WebViewCompat.addWebMessageListener(webView, "AndroidGoogle",
+                Collections.singleton("https://" + APP_HOST),
+                (view, message, sourceOrigin, isMainFrame, replyProxy) -> {
+                    if (!isMainFrame || message.getData() == null) return;
+                    try {
+                        JSONObject req = new JSONObject(message.getData());
+                        String type = req.optString("type");
+                        if ("signIn".equals(type)) {
+                            googleSignIn(req.optString("clientId"), replyProxy);
+                        } else if ("signOut".equals(type)) {
+                            credentialManager.clearCredentialStateAsync(new ClearCredentialStateRequest(),
+                                    new CancellationSignal(), ContextCompat.getMainExecutor(this),
+                                    new CredentialManagerCallback<Void, ClearCredentialException>() {
+                                        @Override public void onResult(Void unused) { }
+                                        @Override public void onError(ClearCredentialException e) { }
+                                    });
+                        }
+                    } catch (Exception e) {
+                        reply(replyProxy, "error", "failed");
+                    }
+                });
+    }
+
+    private void googleSignIn(String clientId, JavaScriptReplyProxy replyProxy) {
+        if (clientId == null || clientId.isEmpty()) {
+            reply(replyProxy, "error", "failed");
+            return;
+        }
+        GetSignInWithGoogleOption option = new GetSignInWithGoogleOption.Builder(clientId).build();
+        GetCredentialRequest request = new GetCredentialRequest.Builder()
+                .addCredentialOption(option)
+                .build();
+        credentialManager.getCredentialAsync(this, request, new CancellationSignal(),
+                ContextCompat.getMainExecutor(this),
+                new CredentialManagerCallback<GetCredentialResponse, GetCredentialException>() {
+                    @Override
+                    public void onResult(GetCredentialResponse response) {
+                        Credential c = response.getCredential();
+                        if (c instanceof CustomCredential
+                                && GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL.equals(c.getType())) {
+                            try {
+                                GoogleIdTokenCredential g = GoogleIdTokenCredential.createFrom(c.getData());
+                                reply(replyProxy, "token", g.getIdToken());
+                                return;
+                            } catch (Exception ignored) { }
+                        }
+                        reply(replyProxy, "error", "failed");
+                    }
+
+                    @Override
+                    public void onError(GetCredentialException e) {
+                        String code = e instanceof GetCredentialCancellationException ? "cancel"
+                                : e instanceof NoCredentialException ? "no_account" : "failed";
+                        reply(replyProxy, "error", code);
+                    }
+                });
+    }
+
+    private void reply(JavaScriptReplyProxy proxy, String key, String value) {
+        try {
+            proxy.postMessage(new JSONObject().put(key, value).toString());
+        } catch (Exception ignored) { }
     }
 
     private void initBackPressHandler() {
