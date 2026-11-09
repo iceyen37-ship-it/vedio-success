@@ -17,8 +17,8 @@ android {
         minSdk 24
         targetSdk 36
         // Increase versionCode by 1 for every upload to Google Play.
-        versionCode 4
-        versionName "1.1.2"
+        versionCode 6
+        versionName "1.2.0"
     }
 
     signingConfigs {
@@ -53,4 +53,8 @@ dependencies {
     implementation 'androidx.core:core:1.16.0'
     implementation 'androidx.webkit:webkit:1.14.0'
     implementation 'com.google.android.material:material:1.12.0'
+    // Google 登入（手機內建的 Google 帳戶選擇畫面）
+    implementation 'androidx.credentials:credentials:1.5.0'
+    implementation 'androidx.credentials:credentials-play-services-auth:1.5.0'
+    implementation 'com.google.android.libraries.identity.googleid:googleid:1.1.1'
 }

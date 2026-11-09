@@ -29,6 +29,32 @@ import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.webkit.WebViewAssetLoader;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
+import androidx.core.content.ContextCompat;
+import androidx.credentials.ClearCredentialStateRequest;
+import androidx.credentials.Credential;
+import androidx.credentials.CredentialManager;
+import androidx.credentials.CredentialManagerCallback;
+import androidx.credentials.CustomCredential;
+import androidx.credentials.GetCredentialRequest;
+import androidx.credentials.GetCredentialResponse;
+import androidx.credentials.exceptions.ClearCredentialException;
+import androidx.credentials.exceptions.GetCredentialCancellationException;
+import androidx.credentials.exceptions.GetCredentialException;
+import androidx.credentials.exceptions.NoCredentialException;
+import androidx.webkit.JavaScriptReplyProxy;
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption;
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential;
+import android.os.CancellationSignal;
+import org.json.JSONObject;
+import android.content.ContentValues;
+import android.os.Build;
+import android.os.Environment;
+import android.util.Base64;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.util.Collections;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -40,6 +66,7 @@ public class MainActivity extends AppCompatActivity {
     private WebView webView;
     private ProgressBar progressBar;
     private WebViewAssetLoader assetLoader;
+    private CredentialManager credentialManager;
 
     // 「拍照記錄」：<input type="file"> 交給手機相機（或相簿）
     private ValueCallback<Uri[]> filePathCallback;
@@ -88,7 +115,10 @@ public class MainActivity extends AppCompatActivity {
                 .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
                 .build();
 
+        credentialManager = CredentialManager.create(this);
         initWebView();
+        initGoogleBridge();
+        initFileBridge();
         initBackPressHandler();
 
         if (savedInstanceState != null) {
@@ -195,6 +225,128 @@ public class MainActivity extends AppCompatActivity {
                 request.deny();
             }
         });
+    }
+
+    // Google 登入：網頁裡的 AndroidGoogle.postMessage({type:"signIn", clientId}) 會打開手機內建的
+    // 「使用 Google 帳戶登入」畫面，拿到的 ID token 只回傳給 App 自己的網頁（appassets 網域）。
+    private void initGoogleBridge() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return;
+        WebViewCompat.addWebMessageListener(webView, "AndroidGoogle",
+                Collections.singleton("https://" + APP_HOST),
+                (view, message, sourceOrigin, isMainFrame, replyProxy) -> {
+                    if (!isMainFrame || message.getData() == null) return;
+                    try {
+                        JSONObject req = new JSONObject(message.getData());
+                        String type = req.optString("type");
+                        if ("signIn".equals(type)) {
+                            googleSignIn(req.optString("clientId"), replyProxy);
+                        } else if ("signOut".equals(type)) {
+                            credentialManager.clearCredentialStateAsync(new ClearCredentialStateRequest(),
+                                    new CancellationSignal(), ContextCompat.getMainExecutor(this),
+                                    new CredentialManagerCallback<Void, ClearCredentialException>() {
+                                        @Override public void onResult(Void unused) { }
+                                        @Override public void onError(ClearCredentialException e) { }
+                                    });
+                        }
+                    } catch (Exception e) {
+                        reply(replyProxy, "error", "failed");
+                    }
+                });
+    }
+
+    // 下載週報／照片：網頁傳來 base64 檔案，Android 10 以上存到「下載/安心呷」，舊手機改用分享選單
+    private void initFileBridge() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return;
+        WebViewCompat.addWebMessageListener(webView, "AndroidFiles",
+                Collections.singleton("https://" + APP_HOST),
+                (view, message, sourceOrigin, isMainFrame, replyProxy) -> {
+                    if (!isMainFrame || message.getData() == null) return;
+                    final String raw = message.getData();
+                    new Thread(() -> {
+                        String result;
+                        try {
+                            JSONObject req = new JSONObject(raw);
+                            String name = req.optString("name", "安心呷").replaceAll("[\\\\/:*?\"<>|]", "_");
+                            String mime = req.optString("mime", "application/octet-stream");
+                            byte[] bytes = Base64.decode(req.optString("data"), Base64.DEFAULT);
+                            result = saveDownload(name, mime, bytes);
+                        } catch (Exception e) {
+                            result = "{\"ok\":false}";
+                        }
+                        final String r = result;
+                        runOnUiThread(() -> {
+                            try { replyProxy.postMessage(r); } catch (Exception ignored) { }
+                        });
+                    }).start();
+                });
+    }
+
+    private String saveDownload(String name, String mime, byte[] bytes) throws Exception {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            v.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+            v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/安心呷");
+            Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+            if (uri == null) throw new Exception("insert failed");
+            try (OutputStream out = getContentResolver().openOutputStream(uri)) {
+                if (out == null) throw new Exception("no stream");
+                out.write(bytes);
+            }
+            return "{\"ok\":true}";
+        }
+        File dir = new File(getCacheDir(), "exports");
+        dir.mkdirs();
+        File f = new File(dir, name);
+        try (FileOutputStream out = new FileOutputStream(f)) { out.write(bytes); }
+        Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", f);
+        Intent send = new Intent(Intent.ACTION_SEND);
+        send.setType(mime);
+        send.putExtra(Intent.EXTRA_STREAM, uri);
+        send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        runOnUiThread(() -> startActivity(Intent.createChooser(send, name)));
+        return "{\"ok\":true,\"shared\":true}";
+    }
+
+    private void googleSignIn(String clientId, JavaScriptReplyProxy replyProxy) {
+        if (clientId == null || clientId.isEmpty()) {
+            reply(replyProxy, "error", "failed");
+            return;
+        }
+        GetSignInWithGoogleOption option = new GetSignInWithGoogleOption.Builder(clientId).build();
+        GetCredentialRequest request = new GetCredentialRequest.Builder()
+                .addCredentialOption(option)
+                .build();
+        credentialManager.getCredentialAsync(this, request, new CancellationSignal(),
+                ContextCompat.getMainExecutor(this),
+                new CredentialManagerCallback<GetCredentialResponse, GetCredentialException>() {
+                    @Override
+                    public void onResult(GetCredentialResponse response) {
+                        Credential c = response.getCredential();
+                        if (c instanceof CustomCredential
+                                && GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL.equals(c.getType())) {
+                            try {
+                                GoogleIdTokenCredential g = GoogleIdTokenCredential.createFrom(c.getData());
+                                reply(replyProxy, "token", g.getIdToken());
+                                return;
+                            } catch (Exception ignored) { }
+                        }
+                        reply(replyProxy, "error", "failed");
+                    }
+
+                    @Override
+                    public void onError(GetCredentialException e) {
+                        String code = e instanceof GetCredentialCancellationException ? "cancel"
+                                : e instanceof NoCredentialException ? "no_account" : "failed";
+                        reply(replyProxy, "error", code);
+                    }
+                });
+    }
+
+    private void reply(JavaScriptReplyProxy proxy, String key, String value) {
+        try {
+            proxy.postMessage(new JSONObject().put(key, value).toString());
+        } catch (Exception ignored) { }
     }
 
     private void initBackPressHandler() {
