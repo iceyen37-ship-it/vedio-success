@@ -1,6 +1,10 @@
 plugins {
     id 'com.android.application'
 }
+// 手機通知（Firebase）：有 google-services.json 才啟用，沒有也能照常打包
+if (file('google-services.json').exists()) {
+    apply plugin: 'com.google.gms.google-services'
+}
 
 // Upload-key signing for Google Play. Values come from environment variables
 // (GitHub Actions secrets) or from ~/.gradle/gradle.properties on your own computer.
@@ -57,4 +61,7 @@ dependencies {
     implementation 'androidx.credentials:credentials:1.5.0'
     implementation 'androidx.credentials:credentials-play-services-auth:1.5.0'
     implementation 'com.google.android.libraries.identity.googleid:googleid:1.1.1'
+    // 手機通知
+    implementation platform('com.google.firebase:firebase-bom:33.5.1')
+    implementation 'com.google.firebase:firebase-messaging'
 }

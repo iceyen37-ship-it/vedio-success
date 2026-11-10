@@ -55,6 +55,10 @@ import android.util.Base64;
 import java.io.FileOutputStream;
 import java.io.OutputStream;
 import java.util.Collections;
+import android.Manifest;
+import android.content.pm.PackageManager;
+import com.google.firebase.FirebaseApp;
+import com.google.firebase.messaging.FirebaseMessaging;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -67,6 +71,17 @@ public class MainActivity extends AppCompatActivity {
     private ProgressBar progressBar;
     private WebViewAssetLoader assetLoader;
     private CredentialManager credentialManager;
+
+    // 手機通知：網頁按「開啟通知」→ 詢問權限 → 回傳通知代碼
+    private JavaScriptReplyProxy pushReply;
+    private String pendingLink;
+    private boolean pageReady;
+    private final ActivityResultLauncher<String> notifyPermLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
+                if (pushReply == null) return;
+                if (granted) sendPushToken(pushReply);
+                else reply(pushReply, "error", "denied");
+            });
 
     // 「拍照記錄」：<input type="file"> 交給手機相機（或相簿）
     private ValueCallback<Uri[]> filePathCallback;
@@ -119,7 +134,9 @@ public class MainActivity extends AppCompatActivity {
         initWebView();
         initGoogleBridge();
         initFileBridge();
+        initPushBridge();
         initBackPressHandler();
+        pendingLink = getIntent() != null ? getIntent().getStringExtra("link") : null;
 
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState);
@@ -148,6 +165,12 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 return assetLoader.shouldInterceptRequest(request.getUrl());
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                pageReady = true;
+                openPushLink();
             }
 
             @Override
@@ -347,6 +370,52 @@ public class MainActivity extends AppCompatActivity {
         try {
             proxy.postMessage(new JSONObject().put(key, value).toString());
         } catch (Exception ignored) { }
+    }
+
+    private void initPushBridge() {
+        PushService.ensureChannel(this);
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return;
+        if (FirebaseApp.getApps(this).isEmpty()) return;          // 沒有 Firebase 設定：網頁不會顯示通知選項
+        WebViewCompat.addWebMessageListener(webView, "AndroidPush",
+                Collections.singleton("https://" + APP_HOST),
+                (view, message, sourceOrigin, isMainFrame, replyProxy) -> {
+                    if (!isMainFrame || message.getData() == null) return;
+                    String type;
+                    try { type = new JSONObject(message.getData()).optString("type"); }
+                    catch (Exception e) { reply(replyProxy, "error", "failed"); return; }
+                    boolean granted = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(this,
+                            Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
+                    if (granted) { sendPushToken(replyProxy); return; }
+                    if ("enable".equals(type)) {
+                        pushReply = replyProxy;
+                        notifyPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
+                    } else {
+                        reply(replyProxy, "error", "denied");
+                    }
+                });
+    }
+
+    private void sendPushToken(JavaScriptReplyProxy proxy) {
+        FirebaseMessaging.getInstance().getToken().addOnCompleteListener(task -> {
+            if (task.isSuccessful() && task.getResult() != null) reply(proxy, "token", task.getResult());
+            else reply(proxy, "error", "failed");
+        });
+    }
+
+    // 點通知打開 App：跳到通知說的那一頁（只接受英文小寫的頁面名稱）
+    private void openPushLink() {
+        if (!pageReady || pendingLink == null) return;
+        String go = Uri.parse(pendingLink).getQueryParameter("go");
+        pendingLink = null;
+        if (go == null || !go.matches("[a-z]{1,12}")) go = "home";
+        webView.evaluateJavascript("window.openFromPush&&openFromPush('" + go + "')", null);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        String link = intent.getStringExtra("link");
+        if (link != null) { pendingLink = link; openPushLink(); }
     }
 
     private void initBackPressHandler() {
