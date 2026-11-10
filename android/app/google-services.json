@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "306016418002",
+    "project_id": "ansimjia",
+    "storage_bucket": "ansimjia.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:306016418002:android:e81bf88d4b617d63eb950b",
+        "android_client_info": {
+          "package_name": "com.ansimjia.swallowcare"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBHQ8TGW7K-WlfURGW9hpAB2rlE8u6lFAs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
